@@ -2,6 +2,8 @@ package br.avisoradar
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
+import android.location.LocationManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -38,6 +40,7 @@ class MainActivity : Activity() {
     private lateinit var chkAcima: CheckBox
     private lateinit var txtArquivo: TextView
     private lateinit var txtStatus: TextView
+    private lateinit var txtGps: TextView
     private lateinit var btnIniciar: Button
     private lateinit var btnParar: Button
     private val handler = Handler(Looper.getMainLooper())
@@ -45,10 +48,27 @@ class MainActivity : Activity() {
     private val atualiza = object : Runnable {
         override fun run() {
             txtStatus.text = RadarService.status
+            val gpsLigado = gpsAtivo()
+            txtGps.visibility = if (gpsLigado) android.view.View.GONE else android.view.View.VISIBLE
             btnIniciar.isEnabled = !RadarService.running
             btnParar.isEnabled = RadarService.running
             handler.postDelayed(this, 1000)
         }
+    }
+
+    private fun gpsAtivo(): Boolean = try {
+        (getSystemService(Context.LOCATION_SERVICE) as LocationManager).isProviderEnabled(LocationManager.GPS_PROVIDER)
+    } catch (e: Exception) { false }
+
+    /** O arquivo de radares já vem dentro do app (pasta assets); copia na primeira abertura. */
+    private fun prepararArquivoEmbutido() {
+        val destino = File(filesDir, RadarService.ARQUIVO)
+        if (destino.exists()) return
+        try {
+            assets.open(RadarService.ARQUIVO).use { entrada ->
+                destino.outputStream().use { saida -> entrada.copyTo(saida) }
+            }
+        } catch (e: Exception) { /* sem arquivo embutido: o usuário escolhe um */ }
     }
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
@@ -56,6 +76,7 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val prefs = getSharedPreferences("config", Context.MODE_PRIVATE)
+        prepararArquivoEmbutido()
 
         val raiz = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -71,9 +92,15 @@ class MainActivity : Activity() {
         raiz.addView(texto("Aviso de Radar", 24f, true))
         raiz.addView(texto("Apita e fala quando há um radar à frente, mesmo com a tela apagada ou em outro app."))
 
+        txtGps = texto("⚠ A localização (GPS) do celular está desligada. Ligue-a nas configurações ou na barra superior, senão o aviso não funciona.", 15f, true).apply {
+            setTextColor(android.graphics.Color.rgb(190, 40, 20))
+            setOnClickListener { startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)) }
+        }
+        raiz.addView(txtGps)
+
         raiz.addView(texto("1. Arquivo de radares", 14f, true))
         val btnArq = Button(this).apply {
-            text = "Escolher arquivo CSV"
+            text = "Trocar o arquivo de radares (opcional)"
             setOnClickListener {
                 val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                     addCategory(Intent.CATEGORY_OPENABLE)
@@ -165,9 +192,9 @@ class MainActivity : Activity() {
     private fun atualizaArquivo() {
         val f = File(filesDir, RadarService.ARQUIVO)
         txtArquivo.text = if (f.exists()) {
-            "Arquivo carregado (${f.length() / 1024} KB). Os tipos marcados abaixo valem na próxima vez que você iniciar."
+            "Arquivo de radares pronto (${f.length() / 1024} KB). Os tipos marcados abaixo valem na próxima vez que você iniciar."
         } else {
-            "Nenhum arquivo escolhido ainda. Escolha o CSV exportado do MapaRadar."
+            "Este app veio sem arquivo de radares. Escolha o CSV exportado do MapaRadar."
         }
     }
 
@@ -195,6 +222,17 @@ class MainActivity : Activity() {
             return
         }
         salvar()
+        if (!gpsAtivo()) {
+            AlertDialog.Builder(this)
+                .setTitle("Ative a localização")
+                .setMessage("O aviso usa o GPS do celular. Ative a localização (GPS) e volte para tocar em Iniciar aviso.")
+                .setPositiveButton("Abrir configurações") { _, _ ->
+                    startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
+                }
+                .setNegativeButton("Cancelar", null)
+                .show()
+            return
+        }
         val faltam = ArrayList<String>()
         if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
             faltam.add(Manifest.permission.ACCESS_FINE_LOCATION)
