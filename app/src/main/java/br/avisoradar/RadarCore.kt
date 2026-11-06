@@ -36,7 +36,7 @@ object Core {
 
     fun alertRadius(speedKmh: Double): Double = max(300.0, speedKmh / 3.6 * 15.0)
 
-    fun beepIntervalMs(distM: Double): Long = min(1600.0, max(350.0, distM * 3.0)).toLong()
+    fun beepIntervalMs(distM: Double): Long = min(1800.0, max(250.0, distM * 4.0)).toLong()
 }
 
 object CsvLoader {
@@ -98,10 +98,11 @@ object CsvLoader {
 
 class Evaluator(private val radares: List<Radar>) {
     private val armed = BooleanArray(radares.size)
+    private val ultima = DoubleArray(radares.size) { Double.NaN }   // distância no fix anterior
 
     class Result(val trigger: Int, val triggerDist: Double, val nearest: Int, val nearestDist: Double)
 
-    fun reset() = armed.fill(false)
+    fun reset() { armed.fill(false); ultima.fill(Double.NaN) }
 
     fun evaluate(lat: Double, lon: Double, speedMps: Double, heading: Double?, onlyAbove: Boolean): Result {
         val speedKmh = speedMps * 3.6
@@ -116,12 +117,18 @@ class Evaluator(private val radares: List<Radar>) {
         var nearD = 0.0
         for (i in radares.indices) {
             val c = radares[i]
-            if (abs(c.lat - lat) > dLatLim) { armed[i] = false; continue }
+            if (abs(c.lat - lat) > dLatLim) { armed[i] = false; ultima[i] = Double.NaN; continue }
             val d = Core.distM(lat, lon, c.lat, c.lon)
-            if (d > far) { armed[i] = false; continue }
+            if (d > far) { armed[i] = false; ultima[i] = Double.NaN; continue }
+            val anterior = ultima[i]
+            ultima[i] = d
             if (!moving) continue
-            if (Core.angDiff(h, Core.bearing(lat, lon, c.lat, c.lon)) > 50.0) continue   // não está à frente
-            if (c.dir >= 0 && Core.angDiff(h, c.dir.toDouble()) > 70.0) continue          // outro sentido
+            val diff = Core.angDiff(h, Core.bearing(lat, lon, c.lat, c.lon))
+            if (diff > 40.0) continue                                  // não está à frente
+            val lateral = d * sin(Math.toRadians(diff))
+            if (lateral > 40.0 + d * 0.1) continue                     // está em outra rua (lado/paralela)
+            if (anterior.isNaN() || d >= anterior - 0.5) continue      // não está se aproximando
+            if (c.dir >= 0 && Core.angDiff(h, c.dir.toDouble()) > 70.0) continue   // outro sentido
             if (near < 0 || d < nearD) { near = i; nearD = d }
             if (d <= radius && !armed[i]) {
                 if (onlyAbove && c.maxSpeed > 0 && speedKmh <= c.maxSpeed) continue
