@@ -36,6 +36,10 @@ class RadarService : Service(), LocationListener, TextToSpeech.OnInitListener {
 
         @Volatile var running = false
         @Volatile var status = "Parado"
+        @Volatile var kmh = 0
+        @Volatile var distRadar = -1      // metros até o próximo radar à frente (-1 = nenhum)
+        @Volatile var limiteRadar = 0
+        @Volatile var alertando = false
     }
 
     private var lm: LocationManager? = null
@@ -49,7 +53,10 @@ class RadarService : Service(), LocationListener, TextToSpeech.OnInitListener {
 
     private var voz = true
     private var soAcima = false
-    private var ativo = -1
+    private var beepAtivo = false
+    private var beepDist = 0.0
+    private var beepVel = 0.0
+    private var beepFix = 0L
     private var ultimoBip = 0L
     private var avisos = 0
 
@@ -112,6 +119,7 @@ class RadarService : Service(), LocationListener, TextToSpeech.OnInitListener {
         lm = l
         try {
             l.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, this, Looper.getMainLooper())
+            main.post(beepLoop)
             status = "${radares.size} radares. Aguardando sinal de GPS…"
             atualizarNotificacao("Aguardando GPS…")
         } catch (e: SecurityException) {
@@ -139,29 +147,29 @@ class RadarService : Service(), LocationListener, TextToSpeech.OnInitListener {
         if (vel.isNaN()) vel = 0.0
 
         val r = ev.evaluate(loc.latitude, loc.longitude, vel, rumo, soAcima)
-        val kmh = (vel * 3.6).roundToInt()
+        val velKmh = (vel * 3.6).roundToInt()
 
-        if (r.trigger >= 0) {
-            ativo = r.trigger
-            avisar(radares[r.trigger], r.triggerDist)
-        }
-        if (ativo >= 0) {
-            if (r.nearest == ativo && r.nearestDist > 25) {
-                if (agora - ultimoBip > Core.beepIntervalMs(r.nearestDist)) {
-                    bipar(ToneGenerator.TONE_PROP_BEEP, 160)
-                    ultimoBip = agora
-                }
-            } else {
-                ativo = -1
-            }
-        }
+        if (r.trigger >= 0) avisar(radares[r.trigger], r.triggerDist)
+
+        // Bipes: enquanto houver radar à frente dentro do alcance, cada vez mais rápidos (ver beepLoop).
+        val limite = if (r.nearest >= 0) radares[r.nearest].maxSpeed else 0
+        val ignorar = soAcima && limite > 0 && velKmh <= limite
+        beepAtivo = r.nearest >= 0 && r.nearestDist <= Core.alertRadius(vel * 3.6) && !ignorar
+        beepDist = r.nearestDist
+        beepVel = vel
+        beepFix = agora
+
+        kmh = velKmh
+        distRadar = if (r.nearest >= 0) r.nearestDist.roundToInt() else -1
+        limiteRadar = limite
+        alertando = beepAtivo && r.nearestDist > 15
 
         status = if (r.nearest >= 0) {
             val c = radares[r.nearest]
-            "$kmh km/h · radar à frente a ${r.nearestDist.roundToInt()} m" +
+            "$velKmh km/h · radar à frente a ${r.nearestDist.roundToInt()} m" +
                 (if (c.maxSpeed > 0) " (limite ${c.maxSpeed})" else "")
         } else {
-            "$kmh km/h · nenhum radar à frente"
+            "$velKmh km/h · nenhum radar à frente"
         }
         atualizarNotificacao(status)
     }
@@ -169,11 +177,27 @@ class RadarService : Service(), LocationListener, TextToSpeech.OnInitListener {
     private fun avisar(c: Radar, dist: Double) {
         avisos++
         bipar(ToneGenerator.TONE_PROP_BEEP2, 250)
-        ultimoBip = SystemClock.elapsedRealtime() + 900
+        ultimoBip = SystemClock.elapsedRealtime() + 1500
         if (voz && ttsOk) {
             val d = max(50, (dist / 50.0).roundToInt() * 50)
             val lim = if (c.maxSpeed > 0) ", limite ${c.maxSpeed}" else ""
             tts?.speak("Radar à frente, $d metros$lim", TextToSpeech.QUEUE_FLUSH, null, "radar")
+        }
+    }
+
+    /** Roda a cada 80 ms: o ritmo dos bipes acompanha a distância estimada, não só os fixes de 1 s do GPS. */
+    private val beepLoop = object : Runnable {
+        override fun run() {
+            if (!running) return
+            val agora = SystemClock.elapsedRealtime()
+            if (beepAtivo && agora - beepFix < 3000) {
+                val d = max(0.0, beepDist - beepVel * (agora - beepFix) / 1000.0)
+                if (d > 15 && agora - ultimoBip >= Core.beepIntervalMs(d)) {
+                    bipar(ToneGenerator.TONE_PROP_BEEP, 120)
+                    ultimoBip = agora
+                }
+            }
+            main.postDelayed(this, 80)
         }
     }
 
@@ -199,6 +223,8 @@ class RadarService : Service(), LocationListener, TextToSpeech.OnInitListener {
     private fun parar(mensagem: String? = null) {
         running = false
         status = mensagem ?: "Parado"
+        kmh = 0; distRadar = -1; limiteRadar = 0; alertando = false; beepAtivo = false
+        main.removeCallbacks(beepLoop)
         try { lm?.removeUpdates(this) } catch (e: Exception) { }
         lm = null
         tts?.shutdown(); tts = null
